@@ -41,4 +41,5 @@ DEFAULT_PARENT_ID = "/"  # 默认为根目录
 python main.py my_folder
 python main.py file1.zip file2.txt -w 5
 python main.py file1.zip -p /我的文档/上传文件夹
+python main.py my_folder1 my_folder2 #注意在windows下请不要在文件夹名最后带上\例如my_folder1\ my_folder2\
 ```
