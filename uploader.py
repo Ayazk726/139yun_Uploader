@@ -202,17 +202,15 @@ class _139Uploader:
                                 return False, name
                             
                             uploaded_bytes += len(chunk)
-                            # 更新进度条描述
                             pbar.set_postfix({"分片": f"{part_number}/{part_count}"})
 
             finally:
                 pbar.close()
-
             # Step 3: Complete (确认完成)
             complete_payload = {
                 "fileId": file_id,
                 "uploadId": upload_id,
-                "contentHash": full_hash,  # 确保哈希一致
+                "contentHash": full_hash,
                 "contentHashAlgorithm": "SHA256"
             }
             
@@ -228,7 +226,6 @@ class _139Uploader:
             return True, name
 
     def parallel_upload_files(self, file_paths, parent_id, max_workers=3):
-        # 并行上传文件列表
         if not file_paths:
             return True
         
@@ -257,11 +254,10 @@ class _139Uploader:
         return success_count == len(file_paths)
 
     def upload_folder(self, local_folder_path, parent_id, max_workers=3):
-        # 上传整个文件夹
         folder_name = os.path.basename(local_folder_path)
         print(f"[*] 开始上传文件夹: {folder_name}")
         
-        # 在云端创建对应的文件夹
+        # 在云盘上创建对应的文件夹
         cloud_folder_id = self.api_client.create_folder(parent_id, folder_name)
         if not cloud_folder_id:
             print(f"[!] 无法在云端创建文件夹: {folder_name}")
@@ -272,10 +268,10 @@ class _139Uploader:
         dir_cloud_ids = {}
         dir_cloud_ids[local_folder_path] = cloud_folder_id
         
-        # 首先创建所有子目录结构
+        # 创建所有子目录结构
         for root, dirs, files in os.walk(local_folder_path):
             if root not in dir_cloud_ids:
-                # 计算相对路径，用于在云端重建目录结构
+                # 计算相对路径，用于在云盘重建目录结构
                 rel_path = os.path.relpath(root, local_folder_path)
                 current_cloud_parent = cloud_folder_id
                 
@@ -284,7 +280,7 @@ class _139Uploader:
                     # 重建目录结构
                     path_parts = rel_path.split(os.sep)
                     for part in path_parts:
-                        # 检查云端是否已存在同名目录
+                        # 检查云盘上是否已存在同名目录
                         existing_folder_id = self.api_client.find_folder_by_name(current_cloud_parent, part)
                         if existing_folder_id:
                             current_cloud_parent = existing_folder_id
@@ -294,18 +290,15 @@ class _139Uploader:
                             if new_folder_id:
                                 current_cloud_parent = new_folder_id
                             else:
-                                print(f"[!] 无法在云端创建子目录: {part}")
+                                print(f"[!] 无法在云盘上创建子目录: {part}")
                                 return False
                 
                 dir_cloud_ids[root] = current_cloud_parent
-        
-        # 然后上传所有文件，并行处理每个目录内的文件
+                
         for root, dirs, files in os.walk(local_folder_path):
-            if files:  # 如果当前目录有文件
+            if files:
                 file_paths = [os.path.join(root, file) for file in files]
                 current_cloud_parent = dir_cloud_ids[root]
-                
-                # 并行上传当前目录的所有文件
                 success = self.parallel_upload_files(file_paths, current_cloud_parent, max_workers)
                 if not success:
                     print(f"[!] 目录 {root} 中的文件上传失败")
@@ -315,7 +308,6 @@ class _139Uploader:
         return True
 
     def parallel_upload(self, file_paths, parent_id, max_workers=3):
-        # 并行上传文件
         # 使用线程池执行器进行并行上传
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有上传任务
