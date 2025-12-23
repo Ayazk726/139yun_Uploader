@@ -16,12 +16,9 @@ def encode_uri_component(s):
     return res
 
 def cal_sign(body_str, ts, rand_str):
-    # 修复签名算法
     body = encode_uri_component(body_str)
-    # 按照字典序排序
     sorted_body = "".join(sorted(body))
     body_b64 = base64.b64encode(sorted_body.encode('utf-8')).decode('utf-8')
-    # 核心算法：GetMD5(body_b64) + GetMD5(ts:randStr)
     res = get_md5(body_b64) + get_md5(f"{ts}:{rand_str}")
     return get_md5(res).upper()
 
@@ -39,5 +36,4 @@ def pause_for_user_input():
         input("\n按回车键退出程序...")
     except KeyboardInterrupt:
         print("\n检测到中断信号，程序退出。")
-        # 不需要再次捕获，直接让 KeyboardInterrupt 向上传播
-        raise # 重新抛出异常以正常退出
+        raise
