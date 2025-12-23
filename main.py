@@ -1,3 +1,4 @@
+# main.py
 import sys
 import os
 from config import Config
@@ -7,21 +8,22 @@ from utils import pause_for_user_input
 def main():
     try:
         if len(sys.argv) < 2:
-            print("用法: python main.py <文件路径1> [文件路径2] [文件路径3] ... [-w 并发数] [-p 云盘路径]")
-            print("用法: python main.py <文件夹路径> [-w 并发数] [-p 云盘路径]")
+            print("用法: python main.py <文件路径1> [文件路径2] ... <文件夹路径1> [文件夹路径2] ... [-w 并发数] [-p 云盘路径]")
             print("示例: python main.py file1.zip file2.txt file3.pdf")
             print("示例: python main.py my_folder")
             print("示例: python main.py file1.zip file2.txt -w 5")
             print("示例: python main.py file1.zip -p /我的文档/上传文件夹")
+            print("示例: python main.py folder1 folder2 -p /目标路径")
+            print("示例: python main.py file1.zip folder1 folder2")
             sys.exit(1)
-        
+
         # 解析命令行参数
         args = sys.argv[1:]
         file_paths = []
-        folder_path = None
+        folder_paths = [] # 存储多个文件夹路径
         max_workers = Config.DEFAULT_MAX_WORKERS  # 默认并发数
         parent_path = None  # 云盘路径
-        
+
         i = 0
         while i < len(args):
             if args[i] == '-w' and i + 1 < len(args):
@@ -31,26 +33,30 @@ def main():
                 except ValueError:
                     print("错误: 并发数必须是整数")
                     sys.exit(1)
-            elif args[i] == '-p':
+            elif args[i] == '-p' and i + 1 < len(args): # 修复：检查下一个参数是否存在
                 parent_path = args[i + 1]
                 i += 2
             else:
                 path = args[i]
                 if os.path.isdir(path):
-                    folder_path = path
+                    folder_paths.append(path) # 添加到文件夹列表
                 elif os.path.isfile(path):
-                    file_paths.append(path)
+                    file_paths.append(path) # 添加到文件列表
                 else:
-                    print(f"[!] 路径不存在: {path}")
+                    print(f"[!] 路径不存在或不是文件/文件夹: {path}")
                     sys.exit(1)
                 i += 1
-        
+
+        if not file_paths and not folder_paths:
+            print("[!] 没有找到有效的文件或文件夹路径")
+            sys.exit(1)
+
         # 设置认证令牌
         AUTHORIZATION = Config.DEFAULT_AUTHORIZATION
-        
+
         # 创建上传器实例
         uploader = _139Uploader(AUTHORIZATION)
-        
+
         # 如果指定了云盘路径，则获取对应的parent_id
         parent_id = Config.DEFAULT_PARENT_ID
         if parent_path:
@@ -58,20 +64,32 @@ def main():
             if not parent_id:
                 print(f"[!] 无法找到云盘路径: {parent_path}")
                 sys.exit(1)
-        
-        # 根据参数类型决定上传方式
-        if folder_path:
-            # 上传整个文件夹
-            uploader.upload_folder(folder_path, parent_id, max_workers=max_workers)
-        elif file_paths:
-            # 并行上传文件
-            uploader.parallel_upload(file_paths, parent_id, max_workers=max_workers)
+
+        # 执行上传任务
+        all_success = True
+
+        # 1. 上传所有文件到指定的 parent_id
+        if file_paths:
+            print(f"[*] 开始上传 {len(file_paths)} 个文件...")
+            success = uploader.parallel_upload(file_paths, parent_id, max_workers=max_workers)
+            all_success = all_success and success
+
+        # 2. 上传所有文件夹到指定的 parent_id
+        if folder_paths:
+            for folder_path in folder_paths:
+                print(f"[*] 开始上传文件夹: {folder_path}")
+                success = uploader.upload_folder(folder_path, parent_id, max_workers=max_workers)
+                all_success = all_success and success
+
+        if all_success:
+            print("\n[+] 所有上传任务完成！")
         else:
-            print("[!] 没有找到有效的文件或文件夹路径")
-            sys.exit(1)
-            
+            print("\n[-] 部分上传任务失败。")
+
     except Exception as e:
         print(f"[!] 程序执行出错: {e}")
+        import traceback
+        traceback.print_exc() # 打印详细错误信息，便于调试
     finally:
         # 在程序结束前暂停，防止命令行窗口自动关闭
         pause_for_user_input()
