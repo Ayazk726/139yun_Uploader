@@ -1,7 +1,6 @@
-# main.py (更新版，处理末尾斜杠、支持并行上传多个文件夹、优化中断处理)
 import sys
 import os
-import re # 导入正则表达式模块
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
 from uploader import _139Uploader
@@ -11,15 +10,13 @@ from utils import pause_for_user_input
 INVALID_CHARS = r'[<>:"/\\|?*]'
 
 def is_path_valid(path):
-    """检查路径名称（去除末尾斜杠后）是否包含非法字符"""
-    # 去除末尾的斜杠
     clean_name = os.path.basename(path.rstrip('/\\'))
     if re.search(INVALID_CHARS, clean_name):
         return False
     return True
 
 def main():
-    executor = None # 定义在更广的作用域，便于 finally 块访问
+    executor = None
     try:
         if len(sys.argv) < 2:
             print("用法: python main.py <文件路径1> [文件路径2] ... <文件夹路径1> [文件夹路径2] ... [-w 并发数] [-p 云盘路径]")
@@ -37,7 +34,7 @@ def main():
         file_paths = []
         folder_paths = []
         max_workers = Config.DEFAULT_MAX_WORKERS  # 默认并发数（用于单个文件夹内的文件上传）
-        parent_path = None  # 云盘路径
+        parent_path = None 
 
         i = 0
         while i < len(args):
@@ -53,19 +50,16 @@ def main():
                 i += 2
             else:
                 path = args[i]
-                # 去除路径末尾的斜杠，以便后续正确处理
                 clean_path = path.rstrip('/\\')
-                
-                # 检查路径名称是否合法（去除末尾斜杠后检查basename）
                 if not is_path_valid(path):
                      print(f"[!] 路径名称包含非法字符，无法处理: {path}")
                      print("    不能包含以下字符: < > : \" / \\ | ? *")
                      sys.exit(1)
                 
                 if os.path.isdir(clean_path):
-                    folder_paths.append(clean_path) # 使用清理后的路径
+                    folder_paths.append(clean_path)
                 elif os.path.isfile(clean_path):
-                    file_paths.append(clean_path) # 使用清理后的路径
+                    file_paths.append(clean_path)
                 else:
                     print(f"[!] 路径不存在或不是文件/文件夹: {clean_path}")
                     sys.exit(1)
@@ -91,28 +85,21 @@ def main():
 
         # 执行上传任务
         all_success = True
-
-        # 1. 上传所有文件到指定的 parent_id
         if file_paths:
             print(f"[*] 开始上传 {len(file_paths)} 个文件...")
             success = uploader.parallel_upload(file_paths, parent_id, max_workers=max_workers)
             all_success = all_success and success
-
-        # 2. 并行上传所有文件夹到指定的 parent_id
         if folder_paths:
             print(f"[*] 开始并行上传 {len(folder_paths)} 个文件夹，每个文件夹内部上传文件的并发数为 {max_workers}...")
             
             # 创建线程池执行器
             executor = ThreadPoolExecutor(max_workers=len(folder_paths))
             try:
-                # 提交所有文件夹上传任务
                 future_to_folder = {executor.submit(uploader.upload_folder, folder_path, parent_id, max_workers): folder_path 
                                   for folder_path in folder_paths}
                 
                 success_count = 0
                 failed_folders = []
-                
-                # 处理完成的任务
                 for future in as_completed(future_to_folder):
                     folder_path = future_to_folder[future]
                     try:
@@ -126,9 +113,8 @@ def main():
                         failed_folders.append(folder_path)
             
             finally:
-                # 确保线程池被关闭
                 print(f"[*] 文件夹上传完成: 成功 {success_count}, 失败 {len(failed_folders)}")
-                executor.shutdown(wait=False) # 不等待正在运行的任务，立即关闭
+                executor.shutdown(wait=False)
                 all_success = all_success and (success_count == len(folder_paths))
 
         if all_success:
