@@ -1,4 +1,3 @@
-# api_client.py
 import requests
 import json
 import time
@@ -41,7 +40,7 @@ class ApiClient:
             "X-Requested-With": "XMLHttpRequest"
         }
         
-        resp = requests.post(url, headers=headers, data=body_str.encode('utf-8'))
+        resp = requests.post(url, headers=headers, data=body_str.encode('utf-8'), timeout=30 )
         return resp.json()
 
     def get_personal_files(self, file_id):
@@ -144,3 +143,4 @@ class ApiClient:
                 return None
         
         return current_id
+

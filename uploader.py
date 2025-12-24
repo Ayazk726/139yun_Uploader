@@ -10,16 +10,26 @@ class _139Uploader:
     def __init__(self, auth_token):
         self.api_client = ApiClient(auth_token)
 
-    def upload_single_file(self, local_path, parent_id):
-        #上传单个文件
+    def upload_single_file(self, local_path, parent_id, interrupted_check_func=None):
+        if interrupted_check_func and interrupted_check_func():
+            print(f"[!] 上传文件 {os.path.basename(local_path)} 被中断。")
+            return False, os.path.basename(local_path)
+
         name = os.path.basename(local_path)
         size = os.path.getsize(local_path)
 
         # 计算 SHA256 - 用于初始化上传
         sha256_hash = hashlib.sha256()
-        with open(local_path, "rb") as f:
-            while chunk := f.read(1024*1024):
-                sha256_hash.update(chunk)
+        try:
+            with open(local_path, "rb") as f:
+                while chunk := f.read(1024*1024):
+                    if interrupted_check_func and interrupted_check_func():
+                        print(f"[!] 上传文件 {name} 被中断 (读取中)。")
+                        return False, name
+                    sha256_hash.update(chunk)
+        except IOError as e:
+            print(f"[!] 读取文件 {local_path} 失败: {e}")
+            return False, name
         full_hash = sha256_hash.hexdigest().upper()
 
         # 计算分片大小和数量
@@ -45,8 +55,7 @@ class _139Uploader:
 
         # 筛选出前100个 partInfos
         first_part_infos = part_infos[:100] if len(part_infos) > 100 else part_infos
-
-        # Step 1: Create - 初始化上传
+        
         create_payload = {
             "contentHash": full_hash,
             "contentHashAlgorithm": "SHA256",
@@ -60,7 +69,15 @@ class _139Uploader:
             "fileRenameMode": "auto_rename"
         }
         
-        res = self.api_client.personal_post("/file/create", create_payload)
+        if interrupted_check_func and interrupted_check_func():
+            print(f"[!] 上传文件 {name} 被中断 (创建前)。")
+            return False, name
+
+        try:
+            res = self.api_client.personal_post("/file/create", create_payload)
+        except Exception as e:
+            print(f"[!] 文件 {name} 创建请求失败: {e}")
+            return False, name
         
         if res.get("code") != "0000":
             print(f"[!] 文件 {name} 创建失败: {res}")
@@ -88,6 +105,11 @@ class _139Uploader:
                     
                     # 上传前100个分片
                     for i, part_info in enumerate(data['partInfos']):
+                        if interrupted_check_func and interrupted_check_func():
+                            print(f"[!] 上传文件 {name} 被中断 (分片 {part_info['partNumber']})。")
+                            pbar.close()
+                            return False, name
+                        
                         part_number = part_info['partNumber']
                         part_size = part_infos[part_number - 1]['partSize']
                         start_pos = part_infos[part_number - 1]['parallelHashCtx']['partOffset']
@@ -101,13 +123,19 @@ class _139Uploader:
                         
                         # 创建一个带进度的上传流
                         class ProgressBytesIO:
-                            def __init__(self, data, pbar, desc=""):
+                            def __init__(self, data, pbar, interrupted_check_func, desc=""):
                                 self.data = data
                                 self.pbar = pbar
+                                self.interrupted_check_func = interrupted_check_func
                                 self.pos = 0
                                 self.desc = desc
                             
                             def read(self, size=-1):
+                                # 在每次读取前检查中断
+                                if self.interrupted_check_func and self.interrupted_check_func():
+                                    print(f"[!] 上传流 {self.desc} 被中断。")
+                                    return b'' # 返回空数据，模拟流结束
+                                
                                 if size == -1:
                                     chunk = self.data[self.pos:]
                                     self.pos = len(self.data)
@@ -120,10 +148,15 @@ class _139Uploader:
                                 
                                 return chunk
                         
-                        progress_stream = ProgressBytesIO(chunk, pbar)
-                        put_resp = requests.put(upload_url, data=progress_stream, 
-                                              headers={"Content-Length": str(len(chunk))})
-                        
+                        progress_stream = ProgressBytesIO(chunk, pbar, interrupted_check_func, name)
+                        try:
+                            put_resp = requests.put(upload_url, data=progress_stream, 
+                                                  headers={"Content-Length": str(len(chunk))})
+                        except requests.exceptions.RequestException as e:
+                            print(f"[!] 分片 {part_number} 上传请求失败: {e}")
+                            pbar.close()
+                            return False, name
+                       
                         if put_resp.status_code not in [200, 201, 204]:
                             print(f"[!] 分片 {part_number} 上传失败，状态码: {put_resp.status_code}")
                             pbar.close()
@@ -135,6 +168,11 @@ class _139Uploader:
 
                     # 如果还有剩余分片，分批获取上传地址并上传
                     for i in range(100, len(part_infos), 100):
+                        if interrupted_check_func and interrupted_check_func():
+                            print(f"[!] 上传文件 {name} 被中断 (处理后续分片)。")
+                            pbar.close()
+                            return False, name
+                        
                         end = min(i + 100, len(part_infos))
                         batch_part_infos = part_infos[i:end]
                         
@@ -150,7 +188,18 @@ class _139Uploader:
                         }
                         
                         pathname = "/file/getUploadUrl"
-                        more_resp = self.api_client.personal_post(pathname, more_data)
+                        try:
+                            more_resp = self.api_client.personal_post(pathname, more_data)
+                        except Exception as e:
+                            print(f"[!] 获取后续分片上传地址请求失败: {e}")
+                            pbar.close()
+                            return False, name
+                        
+                        if interrupted_check_func and interrupted_check_func():
+                            print(f"[!] 上传文件 {name} 被中断 (获取后续地址)。")
+                            pbar.close()
+                            return False, name
+                        
                         if more_resp.get("code") != "0000":
                             print(f"[!] 获取后续分片上传地址失败: {more_resp}")
                             pbar.close()
@@ -160,6 +209,11 @@ class _139Uploader:
                         
                         # 上传后续分片
                         for j, part_info in enumerate(more_data_resp['partInfos']):
+                            if interrupted_check_func and interrupted_check_func():
+                                print(f"[!] 上传文件 {name} 被中断 (上传后续分片 {part_info['partNumber']})。")
+                                pbar.close()
+                                return False, name
+                            
                             part_number = part_info['partNumber']
                             part_size = part_infos[part_number - 1]['partSize']
                             start_pos = part_infos[part_number - 1]['parallelHashCtx']['partOffset']
@@ -173,13 +227,19 @@ class _139Uploader:
                             
                             # 创建一个带进度的上传流
                             class ProgressBytesIO:
-                                def __init__(self, data, pbar, desc=""):
+                                def __init__(self, data, pbar, interrupted_check_func, desc=""):
                                     self.data = data
                                     self.pbar = pbar
+                                    self.interrupted_check_func = interrupted_check_func
                                     self.pos = 0
                                     self.desc = desc
                                 
                                 def read(self, size=-1):
+                                    # 在每次读取前检查中断
+                                    if self.interrupted_check_func and self.interrupted_check_func():
+                                        print(f"[!] 上传流 {self.desc} 被中断。")
+                                        return b'' # 返回空数据，模拟流结束
+                                    
                                     if size == -1:
                                         chunk = self.data[self.pos:]
                                         self.pos = len(self.data)
@@ -192,29 +252,48 @@ class _139Uploader:
                                     
                                     return chunk
                             
-                            progress_stream = ProgressBytesIO(chunk, pbar)
-                            put_resp = requests.put(upload_url, data=progress_stream, 
-                                                  headers={"Content-Length": str(len(chunk))})
+                            progress_stream = ProgressBytesIO(chunk, pbar, interrupted_check_func, name)
+                            try:
+                                put_resp = requests.put(upload_url, data=progress_stream, 
+                                                      headers={"Content-Length": str(len(chunk))})
+                            except requests.exceptions.RequestException as e:
+                                print(f"[!] 后续分片 {part_number} 上传请求失败: {e}")
+                                pbar.close()
+                                return False, name
                             
                             if put_resp.status_code not in [200, 201, 204]:
-                                print(f"[!] 分片 {part_number} 上传失败，状态码: {put_resp.status_code}")
+                                print(f"[!] 后续分片 {part_number} 上传失败，状态码: {put_resp.status_code}")
                                 pbar.close()
                                 return False, name
                             
                             uploaded_bytes += len(chunk)
+                            # 更新进度条描述
                             pbar.set_postfix({"分片": f"{part_number}/{part_count}"})
 
+            except IOError as e:
+                print(f"[!] 读取文件 {local_path} 时发生IO错误: {e}")
+                pbar.close()
+                return False, name
             finally:
                 pbar.close()
-            # Step 3: Complete (确认完成)
+                
             complete_payload = {
                 "fileId": file_id,
                 "uploadId": upload_id,
-                "contentHash": full_hash,
+                "contentHash": full_hash,  # 确保哈希一致
                 "contentHashAlgorithm": "SHA256"
             }
             
-            final_res = self.api_client.personal_post("/file/complete", complete_payload)
+            if interrupted_check_func and interrupted_check_func():
+                print(f"[!] 上传文件 {name} 被中断 (完成阶段)。")
+                return False, name
+            
+            try:
+                final_res = self.api_client.personal_post("/file/complete", complete_payload)
+            except Exception as e:
+                print(f"[!] 文件 {name} 完成上传请求失败: {e}")
+                return False, name
+            
             if final_res.get("code") == "0000":
                 print(f"[+] {os.path.basename(local_path)} 上传成功！")
                 return True, name
@@ -225,21 +304,30 @@ class _139Uploader:
             print(f"[+] {name} 秒传成功！")
             return True, name
 
-    def parallel_upload_files(self, file_paths, parent_id, max_workers=3):
+    def parallel_upload_files(self, file_paths, parent_id, max_workers=3, interrupted_check_func=None):
         if not file_paths:
             return True
-        
-        # 使用线程池执行器进行并行上传
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有上传任务
-            future_to_file = {executor.submit(self.upload_single_file, file_path, parent_id): file_path 
+            future_to_file = {executor.submit(self.upload_single_file, file_path, parent_id, interrupted_check_func): file_path 
                               for file_path in file_paths}
             
             success_count = 0
             failed_files = []
             
-            # 处理完成的任务
             for future in as_completed(future_to_file):
+                # 检查主中断标志
+                if interrupted_check_func and interrupted_check_func():
+                    print("\n检测到中断信号，正在取消未完成的文件上传任务...")
+                    # 取消尚未完成的任务
+                    for f, fp in future_to_file.items():
+                        if not f.done():
+                            print(f"取消文件上传: {fp}")
+                            f.cancel()
+                    # 等待所有任务完成（包括被取消的）
+                    # concurrent.futures.wait(future_to_file, timeout=1) # 可选：设置超时
+                    print("文件上传任务已处理。")
+                    return False # 返回失败，因为被中断了
+            
                 file_path = future_to_file[future]
                 try:
                     result, filename = future.result()
@@ -251,74 +339,101 @@ class _139Uploader:
                     print(f"[!] 上传文件 {file_path} 时发生异常: {exc}")
                     failed_files.append(file_path)
         
+        if failed_files:
+            print(f"[!] 部分文件上传失败: {failed_files}")
+        
         return success_count == len(file_paths)
 
-    def upload_folder(self, local_folder_path, parent_id, max_workers=3):
+    def upload_folder(self, local_folder_path, parent_id, max_workers=3, interrupted_check_func=None):
+        # 上传整个文件夹
         folder_name = os.path.basename(local_folder_path)
-        print(f"[*] 开始上传文件夹: {folder_name}")
         
-        # 在云盘上创建对应的文件夹
+        # 检查中断
+        if interrupted_check_func and interrupted_check_func():
+            print(f"[!] 上传文件夹 {folder_name} 被中断 (开始前)。")
+            return False
+        
+        # 在云端创建对应的文件夹
         cloud_folder_id = self.api_client.create_folder(parent_id, folder_name)
         if not cloud_folder_id:
             print(f"[!] 无法在云端创建文件夹: {folder_name}")
             return False
         
-        # 遍历本地文件夹中的所有文件和子文件夹
-        # 创建一个字典来存储每个目录对应的云端文件夹ID
-        dir_cloud_ids = {}
-        dir_cloud_ids[local_folder_path] = cloud_folder_id
+        # 检查中断
+        if interrupted_check_func and interrupted_check_func():
+            print(f"[!] 上传文件夹 {folder_name} 被中断 (创建云端文件夹后)。")
+            return False
+            
+        dir_cloud_ids = {local_folder_path: cloud_folder_id}
         
-        # 创建所有子目录结构
+        all_rel_paths = []
         for root, dirs, files in os.walk(local_folder_path):
-            if root not in dir_cloud_ids:
-                # 计算相对路径，用于在云盘重建目录结构
+            if root != local_folder_path:
                 rel_path = os.path.relpath(root, local_folder_path)
-                current_cloud_parent = cloud_folder_id
-                
-                # 如果不是根目录，则需要创建子目录
-                if rel_path != ".":
-                    # 重建目录结构
-                    path_parts = rel_path.split(os.sep)
-                    for part in path_parts:
-                        # 检查云盘上是否已存在同名目录
-                        existing_folder_id = self.api_client.find_folder_by_name(current_cloud_parent, part)
-                        if existing_folder_id:
-                            current_cloud_parent = existing_folder_id
-                        else:
-                            # 创建新目录
-                            new_folder_id = self.api_client.create_folder(current_cloud_parent, part)
-                            if new_folder_id:
-                                current_cloud_parent = new_folder_id
-                            else:
-                                print(f"[!] 无法在云盘上创建子目录: {part}")
-                                return False
-                
-                dir_cloud_ids[root] = current_cloud_parent
-                
+                all_rel_paths.append(rel_path)
+
+        all_rel_paths.sort(key=lambda x: x.count(os.sep))
+        for rel_path in all_rel_paths:
+            if interrupted_check_func and interrupted_check_func():
+                print(f"[!] 上传被中断 (创建目录: {rel_path})")
+                return False
+
+            parts = rel_path.split(os.sep)
+            current_parent = cloud_folder_id
+            for part in parts:
+                if interrupted_check_func and interrupted_check_func():
+                    print(f"[!] 上传被中断 (创建子目录: {part})")
+                    return False
+                existing_id = self.api_client.find_folder_by_name(current_parent, part)
+                if existing_id:
+                    current_parent = existing_id
+                else:
+                    new_id = self.api_client.create_folder(current_parent, part)
+                    if not new_id:
+                        print(f"[!] 无法创建子目录: {part} (在 {current_parent} 下)")
+                        return False
+                    current_parent = new_id
+            full_local_path = os.path.join(local_folder_path, rel_path)
+            dir_cloud_ids[full_local_path] = current_parent
+        file_upload_tasks = []
         for root, dirs, files in os.walk(local_folder_path):
             if files:
-                file_paths = [os.path.join(root, file) for file in files]
-                current_cloud_parent = dir_cloud_ids[root]
-                success = self.parallel_upload_files(file_paths, current_cloud_parent, max_workers)
-                if not success:
-                    print(f"[!] 目录 {root} 中的文件上传失败")
-                    return False
+                file_paths = [os.path.join(root, f) for f in files]
+                cloud_parent = dir_cloud_ids[root]
+                file_upload_tasks.append((file_paths, cloud_parent))
+        for file_paths, cloud_parent in file_upload_tasks:
+            if interrupted_check_func and interrupted_check_func():
+                print("[!] 上传被中断 (文件上传阶段)")
+                return False
+            success = self.parallel_upload_files(file_paths, cloud_parent, max_workers, interrupted_check_func)
+            if not success:
+                return False
         
         print(f"[+] 文件夹 {folder_name} 上传完成！")
         return True
 
-    def parallel_upload(self, file_paths, parent_id, max_workers=3):
-        # 使用线程池执行器进行并行上传
+    def parallel_upload(self, file_paths, parent_id, max_workers=3, interrupted_check_func=None):
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有上传任务
-            future_to_file = {executor.submit(self.upload_single_file, file_path, parent_id): file_path 
+            future_to_file = {executor.submit(self.upload_single_file, file_path, parent_id, interrupted_check_func): file_path 
                               for file_path in file_paths}
             
             success_count = 0
             failed_files = []
             
-            # 处理完成的任务
             for future in as_completed(future_to_file):
+                # 检查主中断标志
+                if interrupted_check_func and interrupted_check_func():
+                    print("\n检测到中断信号，正在取消未完成的文件上传任务...")
+                    # 取消尚未完成的任务
+                    for f, fp in future_to_file.items():
+                        if not f.done():
+                            print(f"取消文件上传: {fp}")
+                            f.cancel()
+                    # 等待所有任务完成（包括被取消的）
+                    # concurrent.futures.wait(future_to_file, timeout=1) # 可选：设置超时
+                    print("文件上传任务已处理。")
+                    return False # 返回失败，因为被中断了
+                
                 file_path = future_to_file[future]
                 try:
                     result, filename = future.result()
