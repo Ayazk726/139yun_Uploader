@@ -448,7 +448,7 @@ class _139Uploader:
         
         if total_files > 0:
             print(f"开始上传 {total_files} 个文件...")
-            file_pbar = tqdm(total=total_files, desc="上传文件", unit="file", leave=True)
+            file_pbar = tqdm(total=total_files, desc="尝试秒传", unit="file", leave=True)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_task = {}
                 for file_paths, cloud_parent in file_upload_tasks:
