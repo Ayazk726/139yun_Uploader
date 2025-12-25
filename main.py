@@ -7,6 +7,8 @@ from threading import Event
 from config import Config
 from uploader import _139Uploader
 import keyboard
+from tqdm import tqdm
+import time
 
 INVALID_CHARS = r'[<>:"/\\|?*]'
 
@@ -89,8 +91,11 @@ def main():
 
         if file_paths:
             print(f"[*] 开始上传 {len(file_paths)} 个文件...")
-            success = uploader.parallel_upload(file_paths, parent_id, max_workers=max_workers, interrupted_check_func=lambda: interrupt_event.is_set())
+            # 使用tqdm显示上传进度
+            file_pbar = tqdm(total=len(file_paths), desc="文件上传总进度", unit="file", leave=True)
+            success = uploader.parallel_upload_with_interrupt(file_paths, parent_id, max_workers=max_workers, interrupted_check_func=lambda: interrupt_event.is_set(), file_pbar=file_pbar)
             all_success = all_success and success
+            file_pbar.close()
 
         if folder_paths:
             print(f"[*] 开始并行上传 {len(folder_paths)} 个文件夹，每个文件夹内部上传文件的并发数为 {max_workers}...")
