@@ -2,7 +2,7 @@
 本人菜鸟代码水平请轻喷
 ## 项目简介
 
-本项目是基于 `AList` 和 `OpenList` 关于中国移动云盘驱动代码逻辑移植的python实现，仅支持新个人云api。支持文件和文件夹的上传功能且通过线程池实现并行上传，支持秒传。
+本项目是基于 `AList` 和 `OpenList` 关于中国移动云盘驱动代码逻辑移植的python实现，仅支持新个人云api。支持文件和文件夹的上传功能且通过线程池实现并行上传，支持秒传,且基本实现了断点续传。
 
 ## 前期准备
 
@@ -38,8 +38,9 @@ DEFAULT_PARENT_ID = "/"  # 默认为根目录
 - -p 云盘路径: 指定上传到云盘的路径（可选，默认为 /即你的云盘根路径）。
 ### 示例
 ```python
-python main.py my_folder
-python main.py file1.zip file2.txt -w 5
-python main.py file1.zip -p /我的文档/上传文件夹
-python main.py my_folder1 my_folder2 #注意在windows下请不要在文件夹名最后带上\例如my_folder1\ my_folder2\
+python main.py my_folder #上传指定文件夹 windows下不要在文件夹名最后带上\ 例如my_folder1\ my_folder2\
+python main.py file1.zip file2.txt -w 5 #上传多个文件 设置并发数为5
+python main.py file1.zip -p /我的文档/上传文件夹 #上传文件指定云盘的路径保存
+python main.py my_folder1 my_folder2 #上传多个文件夹 注意在windows下请不要在文件夹名最后带上\ 例如my_folder1\ my_folder2\
+python main.py file1.zip my_folder #上传文件和文件夹（将优先上传文件）
 ```
