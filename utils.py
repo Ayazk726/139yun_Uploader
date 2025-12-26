@@ -23,7 +23,6 @@ def cal_sign(body_str, ts, rand_str):
     return get_md5(res).upper()
 
 def get_part_size(size):
-    """根据文件大小计算分片大小"""
     # 默认分片大小为100MB
     part_size = 100 * 1024 * 1024  # 100MB
     if size > 30 * 1024 * 1024 * 1024:  # 30GB
@@ -31,7 +30,6 @@ def get_part_size(size):
     return part_size
 
 def pause_for_user_input():
-    """暂停程序执行，等待用户输入"""
     try:
         input("\n按回车键退出程序...")
     except KeyboardInterrupt:
