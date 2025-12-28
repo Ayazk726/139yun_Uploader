@@ -23,6 +23,54 @@ def is_path_valid(path):
     clean_name = os.path.basename(path.rstrip('/\\'))
     return not re.search(INVALID_CHARS, clean_name)
 
+def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
+    if not file_paths: return
+
+    total_pbar = tqdm(total=len(file_paths), desc="文件总体进度", unit="file", position=0)
+    hash_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="HashWorker")
+    upload_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="NetWorker")
+
+    hash_futures = []
+    upload_futures = []
+
+    try:
+        for fp in file_paths:
+            if interrupt_event.is_set(): break
+            f = hash_executor.submit(
+                uploader.prepare_file_metadata, 
+                fp, 
+                parent_id, 
+                lambda: interrupt_event.is_set()
+            )
+            hash_futures.append(f)
+
+        for future in as_completed(hash_futures):
+            if interrupt_event.is_set(): break
+            try:
+                task_context = future.result()
+                if task_context:
+                    up_f = upload_executor.submit(
+                        uploader.execute_file_upload, 
+                        task_context, 
+                        lambda: interrupt_event.is_set(), 
+                        total_pbar
+                    )
+                    upload_futures.append(up_f)
+            except Exception as e:
+                print(f"Hash阶段异常: {e}")
+
+        for future in as_completed(upload_futures):
+            if interrupt_event.is_set(): break
+            try:
+                future.result()
+            except Exception:
+                pass
+
+    finally:
+        hash_executor.shutdown(wait=False)
+        upload_executor.shutdown(wait=True)
+        total_pbar.close()
+
 def main():
     try:
         keyboard_interrupt_handler()
@@ -51,25 +99,26 @@ def main():
         if parent_path:
             parent_id = uploader.api_client.get_folder_id_by_path(parent_path) or parent_id
 
-        # 处理独立文件
         if file_paths:
-            total_pbar = tqdm(total=len(file_paths), desc="文件总体进度", unit="file", position=0)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(uploader.upload_single_file, fp, parent_id, 
-                                         lambda: interrupt_event.is_set(), total_pbar) for fp in file_paths]
-                for f in as_completed(futures):
-                    if interrupt_event.is_set(): break
-            total_pbar.close()
+            print(f"[*] 正在处理 {len(file_paths)} 个独立文件...")
+            process_files_pipeline(uploader, file_paths, parent_id, max_workers)
 
-        # 顺序处理文件夹
         for folder in folder_paths:
             if interrupt_event.is_set(): break
-            uploader.upload_folder(folder, parent_id, max_workers, lambda: interrupt_event.is_set())
+            print(f"[*] 正在处理文件夹: {os.path.basename(folder)}")
+            uploader.upload_folder(
+                folder, 
+                parent_id, 
+                max_workers=max_workers, 
+                interrupted_check_func=lambda: interrupt_event.is_set()
+            )
 
         print("\n[+] 任务处理完成。" if not interrupt_event.is_set() else "\n[-] 任务已中断。")
 
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         keyboard.unhook_all()
         if not interrupt_event.is_set(): input("\nDone. Press Enter...")
