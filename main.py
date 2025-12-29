@@ -26,10 +26,15 @@ def is_path_valid(path):
 def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
     if not file_paths: return
 
-    # 总进度条固定在 position 0
+    # 计算总大小
+    total_size = sum(os.path.getsize(f) for f in file_paths)
+
+    # 初始化两个固定进度条
+    # Position 0: 文件总体进度
     total_pbar = tqdm(total=len(file_paths), desc="文件总体进度", unit="file", position=0, leave=True)
+    # Position 1: 校验总体进度 (新增)
+    verify_pbar = tqdm(total=total_size, desc="校验总进度", unit="B", unit_scale=True, unit_divisor=1024, position=1, leave=True)
     
-    # 修改 1: Hash 线程数现在由 max_workers 控制
     hash_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HashWorker")
     upload_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="NetWorker")
 
@@ -39,11 +44,13 @@ def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
     try:
         for fp in file_paths:
             if interrupt_event.is_set(): break
+            # 修改：传入 verify_pbar
             f = hash_executor.submit(
                 uploader.prepare_file_metadata, 
                 fp, 
                 parent_id, 
-                lambda: interrupt_event.is_set()
+                lambda: interrupt_event.is_set(),
+                verify_pbar
             )
             hash_futures.append(f)
 
@@ -73,6 +80,7 @@ def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
         hash_executor.shutdown(wait=False)
         upload_executor.shutdown(wait=True)
         total_pbar.close()
+        verify_pbar.close() # 关闭校验进度条
 
 def main():
     try:
