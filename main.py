@@ -26,8 +26,11 @@ def is_path_valid(path):
 def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
     if not file_paths: return
 
-    total_pbar = tqdm(total=len(file_paths), desc="文件总体进度", unit="file", position=0)
-    hash_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="HashWorker")
+    # 总进度条固定在 position 0
+    total_pbar = tqdm(total=len(file_paths), desc="文件总体进度", unit="file", position=0, leave=True)
+    
+    # 修改 1: Hash 线程数现在由 max_workers 控制
+    hash_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HashWorker")
     upload_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="NetWorker")
 
     hash_futures = []

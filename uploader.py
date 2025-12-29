@@ -98,6 +98,7 @@ class _139Uploader:
 
     def _get_available_position(self):
         with self.pbar_position_lock:
+            # 从位置 1 开始，位置 0 预留给总体进度条
             for pos in range(1, 100):
                 if pos not in self.active_positions:
                     self.active_positions.add(pos)
@@ -149,11 +150,25 @@ class _139Uploader:
                 return {"mode": "resume", "local_path": local_path, "name": name, "size": size, "progress_data": pd, "parent_id": parent_id}
 
             sha256 = hashlib.sha256()
-            with tqdm(total=size, unit='B', unit_scale=True, unit_divisor=1024, desc=f"校验 {name[:10]}", leave=False, position=1) as hpbar:
+            
+            # 修改 2: 处理校验进度条覆写及 256MB 显示限制
+            hpbar = None
+            my_pos = None
+            if size >= 256 * 1024 * 1024:
+                my_pos = self._get_available_position()
+                hpbar = tqdm(total=size, unit='B', unit_scale=True, unit_divisor=1024, 
+                             desc=f"校验 {name[:10]}", leave=False, position=my_pos)
+            
+            try:
                 with open(local_path, "rb") as f:
                     while chunk := f.read(1024*1024): 
                         if interrupted_check_func and interrupted_check_func(): return None
-                        sha256.update(chunk); hpbar.update(len(chunk))
+                        sha256.update(chunk)
+                        if hpbar: hpbar.update(len(chunk))
+            finally:
+                if hpbar:
+                    hpbar.close()
+                    self._release_position(my_pos)
             
             full_hash = sha256.hexdigest().upper()
             part_size = get_part_size(size)
@@ -192,6 +207,8 @@ class _139Uploader:
 
             size = task_context["size"]
             pure_auth = self.api_client.auth.replace("Basic ", "")
+            
+            # 始终使用动态 Position 避免覆写
             if size >= 10 * 1024 * 1024:
                 my_pos = self._get_available_position()
                 desc = "  续传" if task_context["mode"] == "resume" else "  ↳"
@@ -278,8 +295,11 @@ class _139Uploader:
         if not file_tasks: return True
 
         total_files = sum(len(t[0]) for t in file_tasks)
-        file_pbar = tqdm(total=total_files, desc="总文件进度", unit="file", position=0)
-        h_exec = ThreadPoolExecutor(max_workers=4, thread_name_prefix="HashWorker")
+        # 总进度条固定在 position 0
+        file_pbar = tqdm(total=total_files, desc="总文件进度", unit="file", position=0, leave=True)
+        
+        # 修改 1: Hash 线程数受传入的 max_workers 控制
+        h_exec = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HashWorker")
         u_exec = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="NetWorker")
         h_futures, u_futures = [], []
         try:
