@@ -41,6 +41,6 @@ DEFAULT_PARENT_ID = "/"  # 默认为根目录
 python main.py my_folder #上传指定文件夹 windows下不要在文件夹名最后带上\ 例如my_folder1\ my_folder2\
 python main.py file1.zip file2.txt -w 5 #上传多个文件 设置并发数为5
 python main.py file1.zip -p /我的文档/上传文件夹 #上传文件指定云盘的路径保存
-python main.py my_folder1 my_folder2 #上传多个文件夹 注意请不要在文件夹名最后带上\ 例如my_folder1\ my_folder2\
+python main.py my_folder1 my_folder2 #上传多个文件夹
 python main.py file1.zip my_folder #上传文件和文件夹（将优先上传文件）
 ```

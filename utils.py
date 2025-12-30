@@ -24,7 +24,7 @@ def cal_sign(body_str, ts, rand_str):
 
 def get_part_size(size):
     # 默认分片大小为100MB
-    part_size = 100 * 1024 * 1024  # 100MB
+    part_size = 128 * 1024 * 1024  # 100MB
     if size > 30 * 1024 * 1024 * 1024:  # 30GB
         part_size = 512 * 1024 * 1024  # 512MB
     return part_size
