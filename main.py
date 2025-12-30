@@ -7,6 +7,7 @@ from config import Config
 from uploader import _139Uploader
 import keyboard
 from tqdm import tqdm
+import traceback
 
 INVALID_CHARS = r'[<>:"/\\|?*]'
 interrupt_event = Event()
@@ -26,13 +27,9 @@ def is_path_valid(path):
 def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
     if not file_paths: return
 
-    # 计算总大小
     total_size = sum(os.path.getsize(f) for f in file_paths)
 
-    # 初始化两个固定进度条
-    # Position 0: 文件总体进度
     total_pbar = tqdm(total=len(file_paths), desc="文件总体进度", unit="file", position=0, leave=True)
-    # Position 1: 校验总体进度 (新增)
     verify_pbar = tqdm(total=total_size, desc="校验总进度", unit="B", unit_scale=True, unit_divisor=1024, position=1, leave=True)
     
     hash_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HashWorker")
@@ -44,7 +41,6 @@ def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
     try:
         for fp in file_paths:
             if interrupt_event.is_set(): break
-            # 修改：传入 verify_pbar
             f = hash_executor.submit(
                 uploader.prepare_file_metadata, 
                 fp, 
@@ -80,10 +76,17 @@ def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
         hash_executor.shutdown(wait=False)
         upload_executor.shutdown(wait=True)
         total_pbar.close()
-        verify_pbar.close() # 关闭校验进度条
+        verify_pbar.close()
 
 def main():
     try:
+        # --- 修复：Auth 判空校验 ---
+        auth = Config.DEFAULT_AUTHORIZATION.strip()
+        if not auth:
+            print("\n[!] 错误: 未在 config.py 中检测到有效的 DEFAULT_AUTHORIZATION。")
+            print("[*] 请在 config.py 中填入您的令牌后再运行程序。")
+            return
+
         keyboard_interrupt_handler()
         if len(sys.argv) < 2:
             print("Usage: python main.py <paths...> [-w workers] [-p cloud_path]")
@@ -99,13 +102,25 @@ def main():
             elif args[i] == '-p' and i + 1 < len(args):
                 parent_path = args[i + 1]; i += 2
             else:
-                p = args[i].strip('"\'')
-                if not is_path_valid(p): sys.exit(1)
-                if os.path.isdir(p): folder_paths.append(p)
-                elif os.path.isfile(p): file_paths.append(p)
+                # --- 修复：处理带斜杠的路径 Bug ---
+                raw_input = args[i].strip('"\'').rstrip('/\\')
+                if not raw_input: 
+                    i += 1
+                    continue
+
+                if not is_path_valid(raw_input): 
+                    print(f"[!] 路径包含非法字符: {raw_input}")
+                    sys.exit(1)
+                
+                if os.path.isdir(raw_input): 
+                    folder_paths.append(raw_input)
+                elif os.path.isfile(raw_input): 
+                    file_paths.append(raw_input)
+                else:
+                    print(f"[!] 警告: 找不到该路径: {raw_input}")
                 i += 1
 
-        uploader = _139Uploader(Config.DEFAULT_AUTHORIZATION)
+        uploader = _139Uploader(auth)
         parent_id = Config.DEFAULT_PARENT_ID
         if parent_path:
             parent_id = uploader.api_client.get_folder_id_by_path(parent_path) or parent_id
@@ -128,7 +143,6 @@ def main():
 
     except Exception as e:
         print(f"Error: {e}")
-        import traceback
         traceback.print_exc()
     finally:
         keyboard.unhook_all()

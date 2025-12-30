@@ -13,10 +13,6 @@ import traceback
 
 
 class FileSliceReader:
-    """
-    仅在 requests 读取时从磁盘读取数据，避免内存溢出。
-    """
-
     def __init__(
         self, filepath, offset, length, pbar=None, interrupt_func=None
     ):
@@ -111,7 +107,6 @@ class _139Uploader:
 
     def _get_available_position(self):
         with self.pbar_position_lock:
-            # 从位置 2 开始，位置 0 预留给总体文件数进度，位置 1 预留给总体校验进度
             for pos in range(2, 100):
                 if pos not in self.active_positions:
                     self.active_positions.add(pos)
@@ -185,7 +180,6 @@ class _139Uploader:
                 tqdm.write(
                     f"[!] 文件过大: {name} ({size/1024**3:.2f}GB)。已跳过。"
                 )
-                # 跳过文件，直接更新全局校验进度
                 if global_verify_pbar:
                     with global_verify_pbar.get_lock():
                         global_verify_pbar.update(size)
@@ -198,7 +192,6 @@ class _139Uploader:
 
             pd = self.get_file_progress(local_path)
             if pd:
-                # 续传文件，无需重新哈希，直接更新全局校验进度
                 if global_verify_pbar:
                     with global_verify_pbar.get_lock():
                         global_verify_pbar.update(size)
@@ -212,8 +205,6 @@ class _139Uploader:
                 }
 
             sha256 = hashlib.sha256()
-
-            # 改为更新全局 global_verify_pbar
             try:
                 with open(local_path, "rb") as f:
                     while chunk := f.read(1024 * 1024):
@@ -254,7 +245,6 @@ class _139Uploader:
 
             data = res.get("data", {})
             if res.get("code") != "0000" or data.get("exist"):
-                # 如果文件秒传/已存在，也算处理完毕（进度条之前在read里已经走完）
                 return {
                     "mode": "finished",
                     "name": name,
@@ -274,7 +264,6 @@ class _139Uploader:
             }
         except Exception as e:
             self._log(f"准备失败 {name}: {e}")
-            # 失败时可能进度条没走完，这里不强制补齐，以免 confusing
             return {
                 "mode": "finished",
                 "name": name,
@@ -312,7 +301,6 @@ class _139Uploader:
             size = task_context["size"]
             pure_auth = self.api_client.auth.replace("Basic ", "")
 
-            # 使用动态 Position 避免覆写，从 2 开始
             if size >= 10 * 1024 * 1024:
                 my_pos = self._get_available_position()
                 desc = "  续传" if task_context["mode"] == "resume" else "  ↳"
@@ -440,16 +428,19 @@ class _139Uploader:
         max_workers=3,
         interrupted_check_func=None,
     ):
-        folder_name = os.path.basename(local_folder_path)
+        # --- 修复：路径斜杠清洗与变量命名错误 ---
+        processed_path = local_folder_path.rstrip('/\\')
+        folder_name = os.path.basename(processed_path)
+        
         root_id = self.create_folder_with_name(
             parent_id, folder_name, interrupted_check_func
         )
         if not root_id:
             return False
 
-        dir_cloud_ids = {os.path.abspath(local_folder_path): root_id}
+        dir_cloud_ids = {os.path.abspath(processed_path): root_id}
         all_dirs = []
-        for root, dirs, _ in os.walk(local_folder_path):
+        for root, dirs, _ in os.walk(processed_path):
             for d in dirs:
                 all_dirs.append(os.path.abspath(os.path.join(root, d)))
         all_dirs.sort(key=lambda x: x.count(os.sep))
@@ -493,7 +484,7 @@ class _139Uploader:
             dir_pbar.close()
 
         file_tasks = []
-        for root, _, files in os.walk(local_folder_path):
+        for root, _, files in os.walk(processed_path):
             abs_root = os.path.abspath(root)
             if files and abs_root in dir_cloud_ids:
                 file_tasks.append(
@@ -505,7 +496,6 @@ class _139Uploader:
         if not file_tasks:
             return True
 
-        # 计算所有文件总大小和总数量
         total_files_count = 0
         total_files_size = 0
         for f_paths, _ in file_tasks:
@@ -513,7 +503,6 @@ class _139Uploader:
             for fp in f_paths:
                 total_files_size += os.path.getsize(fp)
 
-        # 初始化全局进度条 (pos 0: 文件数, pos 1: 校验字节)
         file_pbar = tqdm(
             total=total_files_count,
             desc="文件总进度",
@@ -541,7 +530,6 @@ class _139Uploader:
         try:
             for f_paths, p_id in file_tasks:
                 for fp in f_paths:
-                    # 传入 verify_pbar
                     h_futures.append(
                         h_exec.submit(
                             self.prepare_file_metadata,
@@ -572,5 +560,5 @@ class _139Uploader:
             h_exec.shutdown(wait=False)
             u_exec.shutdown(wait=True)
             file_pbar.close()
-            verify_pbar.close()  # 关闭校验进度条
+            verify_pbar.close()
         return True
