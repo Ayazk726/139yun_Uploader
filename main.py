@@ -118,6 +118,7 @@ def main():
                     file_paths.append(raw_input)
                 else:
                     print(f"[!] 警告: 找不到该路径: {raw_input}")
+                    sys.exit(1)
                 i += 1
 
         uploader = _139Uploader(auth)
