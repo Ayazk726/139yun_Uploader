@@ -51,7 +51,6 @@ def process_files_pipeline(uploader, file_paths, parent_id, max_workers, speed_m
 
     # 速度更新线程
     def update_speed_display():
-        """独立线程用于更新进度条上的速度显示"""
         last_update = time.time()
         while not interrupt_event.is_set():
             try:
