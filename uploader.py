@@ -529,6 +529,31 @@ class _139Uploader:
             leave=True,
         )
 
+        # 速度更新线程函数
+        def update_folder_speed_display():
+            """更新文件夹上传进度条上的速度显示"""
+            last_update = time.time()
+            while True:
+                try:
+                    time.sleep(0.1)
+                    current_time = time.time()
+
+                    # 检查是否所有任务都完成了
+                    if interrupt_event.is_set():
+                        break
+
+                    # 更新速度显示
+                    if current_time - last_update >= 0.5:
+                        _, speed_str = speed_monitor.get_speed_and_formatted()
+                        file_pbar.set_postfix(speed=speed_str)
+                        last_update = current_time
+                except Exception:
+                    break
+
+        # 启动速度显示更新线程
+        speed_update_thread = threading.Thread(target=update_folder_speed_display, daemon=True)
+        speed_update_thread.start()
+
         h_exec = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="HashWorker"
         )
@@ -571,6 +596,9 @@ class _139Uploader:
         finally:
             h_exec.shutdown(wait=False)
             u_exec.shutdown(wait=True)
+            # 显示最终速度
+            _, speed_str = speed_monitor.get_speed_and_formatted()
+            file_pbar.set_postfix(speed=speed_str)
             file_pbar.close()
             verify_pbar.close()
         return True
