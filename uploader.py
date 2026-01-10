@@ -529,31 +529,6 @@ class _139Uploader:
             leave=True,
         )
 
-        # 速度更新线程函数
-        def update_folder_speed_display():
-            """更新文件夹上传进度条上的速度显示"""
-            last_update = time.time()
-            while True:
-                try:
-                    time.sleep(0.1)
-                    current_time = time.time()
-
-                    # 检查是否所有任务都完成了
-                    if interrupt_event.is_set():
-                        break
-
-                    # 更新速度显示
-                    if current_time - last_update >= 0.5:
-                        _, speed_str = speed_monitor.get_speed_and_formatted()
-                        file_pbar.set_postfix(speed=speed_str)
-                        last_update = current_time
-                except Exception:
-                    break
-
-        # 启动速度显示更新线程
-        speed_update_thread = threading.Thread(target=update_folder_speed_display, daemon=True)
-        speed_update_thread.start()
-
         h_exec = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="HashWorker"
         )
@@ -561,6 +536,45 @@ class _139Uploader:
             max_workers=max_workers, thread_name_prefix="NetWorker"
         )
         h_futures, u_futures = [], []
+
+        # 用于跟踪上传任务进度的变量
+        upload_completed = False
+        upload_lock = threading.Lock()
+
+        def mark_upload_complete():
+            nonlocal upload_completed
+            with upload_lock:
+                upload_completed = True
+
+        # 速度更新线程
+        def update_speed_display():
+            """独立线程用于更新进度条上的速度显示"""
+            last_update = time.time()
+            while not upload_completed:
+                try:
+                    time.sleep(0.1)
+                    current_time = time.time()
+
+                    # 检查是否中断
+                    if interrupted_check_func and interrupted_check_func():
+                        break
+
+                    # 每0.5秒更新一次速度显示
+                    if current_time - last_update >= 0.5:
+                        _, speed_str = speed_monitor.get_speed_and_formatted()
+                        file_pbar.set_postfix(speed=speed_str)
+                        last_update = current_time
+                except Exception:
+                    break
+
+            # 任务完成后显示最终速度
+            _, speed_str = speed_monitor.get_speed_and_formatted()
+            file_pbar.set_postfix(speed=speed_str)
+
+        # 启动速度更新线程
+        speed_thread = threading.Thread(target=update_speed_display, daemon=True)
+        speed_thread.start()
+
         try:
             for f_paths, p_id in file_tasks:
                 for fp in f_paths:
@@ -575,6 +589,7 @@ class _139Uploader:
                     )
             for f in as_completed(h_futures):
                 if interrupted_check_func and interrupted_check_func():
+                    mark_upload_complete()
                     break
                 ctx = f.result()
                 if ctx:
@@ -591,14 +606,19 @@ class _139Uploader:
                     )
             for f in as_completed(u_futures):
                 if interrupted_check_func and interrupted_check_func():
+                    mark_upload_complete()
                     break
                 f.result()
+
+            # 标记上传完成
+            mark_upload_complete()
+
+        except Exception:
+            mark_upload_complete()
+            raise
         finally:
             h_exec.shutdown(wait=False)
             u_exec.shutdown(wait=True)
-            # 显示最终速度
-            _, speed_str = speed_monitor.get_speed_and_formatted()
-            file_pbar.set_postfix(speed=speed_str)
             file_pbar.close()
             verify_pbar.close()
         return True
