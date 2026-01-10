@@ -4,7 +4,7 @@ import requests
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from api_client import ApiClient
-from utils import get_part_size
+from utils import get_part_size, safe_pad
 import threading
 import sys
 import time
@@ -14,13 +14,14 @@ import traceback
 
 class FileSliceReader:
     def __init__(
-        self, filepath, offset, length, pbar=None, interrupt_func=None
+        self, filepath, offset, length, pbar=None, interrupt_func=None, speed_monitor=None
     ):
         self.filepath = filepath
         self.offset = offset
         self.length = length
         self.pbar = pbar
         self.interrupt_func = interrupt_func
+        self.speed_monitor = speed_monitor
         self.f = open(filepath, "rb")
         self.f.seek(offset)
         self.remaining = length
@@ -37,10 +38,14 @@ class FileSliceReader:
             else min(size, self.remaining)
         )
         data = self.f.read(read_size)
-        self.remaining -= len(data)
+        bytes_read = len(data)
+        self.remaining -= bytes_read
         if self.pbar:
             with self.lock:
-                self.pbar.update(len(data))
+                self.pbar.update(bytes_read)
+        # 更新全局速度监控器
+        if self.speed_monitor and bytes_read > 0:
+            self.speed_monitor.update(bytes_read)
         return data
 
     def close(self):
@@ -124,13 +129,13 @@ class _139Uploader:
                 file_pbar.update(1)
 
     def _upload_chunk_with_retry(
-        self, upload_url, local_path, offset, size, pbar, interrupted_check_func
+        self, upload_url, local_path, offset, size, pbar, interrupted_check_func, speed_monitor=None
     ):
         for retry_count in range(5):
             if interrupted_check_func and interrupted_check_func():
                 return False
             stream = FileSliceReader(
-                local_path, offset, size, pbar, interrupted_check_func
+                local_path, offset, size, pbar, interrupted_check_func, speed_monitor
             )
             try:
                 resp = requests.put(
@@ -272,7 +277,7 @@ class _139Uploader:
             }
 
     def execute_file_upload(
-        self, task_context, interrupted_check_func, file_pbar
+        self, task_context, interrupted_check_func, file_pbar, speed_monitor=None, file_size=0
     ):
         local_path, name = task_context["local_path"], task_context["name"]
         if task_context["mode"] == "finished":
@@ -303,13 +308,15 @@ class _139Uploader:
 
             if size >= 10 * 1024 * 1024:
                 my_pos = self._get_available_position()
-                desc = "  续传" if task_context["mode"] == "resume" else "  ↳"
+                mode_desc = "续传" if task_context["mode"] == "resume" else "上传"
+                # 使用 safe_pad 确保文件名显示宽度一致，避免全角字符导致的换行问题
+                display_name = safe_pad(name, 20)
                 pbar = tqdm(
                     total=size,
                     unit="B",
                     unit_scale=True,
                     unit_divisor=1024,
-                    desc=f"{desc} {name[:15]}",
+                    desc=f"  {mode_desc}: {display_name}",
                     leave=False,
                     position=my_pos,
                 )
@@ -360,6 +367,7 @@ class _139Uploader:
                         p_item["partSize"],
                         pbar,
                         interrupted_check_func,
+                        speed_monitor
                     ):
                         completed.append(p_num)
                         self.save_file_progress(
@@ -427,6 +435,7 @@ class _139Uploader:
         parent_id,
         max_workers=3,
         interrupted_check_func=None,
+        speed_monitor=None,
     ):
         # --- 修复：路径斜杠清洗与变量命名错误 ---
         processed_path = local_folder_path.rstrip('/\\')
@@ -544,12 +553,15 @@ class _139Uploader:
                     break
                 ctx = f.result()
                 if ctx:
+                    file_size = os.path.getsize(ctx.get("local_path", "")) if ctx.get("mode") == "new" else 0
                     u_futures.append(
                         u_exec.submit(
                             self.execute_file_upload,
                             ctx,
                             interrupted_check_func,
                             file_pbar,
+                            speed_monitor,
+                            file_size
                         )
                     )
             for f in as_completed(u_futures):
