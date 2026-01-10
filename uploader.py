@@ -1,10 +1,9 @@
 import os
 import hashlib
 import requests
-from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from api_client import ApiClient
-from utils import get_part_size
+from utils import get_part_size, ProgressManager
 import threading
 import sys
 import time
@@ -14,12 +13,13 @@ import traceback
 
 class FileSliceReader:
     def __init__(
-        self, filepath, offset, length, pbar=None, interrupt_func=None
+        self, filepath, offset, length, progress_manager=None, task_id=None, interrupt_func=None
     ):
         self.filepath = filepath
         self.offset = offset
         self.length = length
-        self.pbar = pbar
+        self.progress_manager = progress_manager
+        self.task_id = task_id
         self.interrupt_func = interrupt_func
         self.f = open(filepath, "rb")
         self.f.seek(offset)
@@ -38,9 +38,9 @@ class FileSliceReader:
         )
         data = self.f.read(read_size)
         self.remaining -= len(data)
-        if self.pbar:
+        if self.progress_manager and self.task_id is not None:
             with self.lock:
-                self.pbar.update(len(data))
+                self.progress_manager.update_file_task(self.task_id, advance=len(data))
         return data
 
     def close(self):
@@ -53,15 +53,14 @@ class FileSliceReader:
 
 
 class _139Uploader:
-    def __init__(self, auth_token):
+    def __init__(self, auth_token, progress_manager=None):
         self.api_client = ApiClient(auth_token)
         self.progress_file = "upload_progress.json"
         self.progress_lock = threading.Lock()
         self.all_progress = self._load_all_progress()
-        self.pbar_position_lock = threading.Lock()
-        self.active_positions = set()
         self.log_lock = threading.Lock()
         self.dir_map_lock = threading.Lock()
+        self.progress_manager = progress_manager
 
     def _log(self, message):
         with self.log_lock:
@@ -105,32 +104,18 @@ class _139Uploader:
                 del self.all_progress[abs_path]
                 self._save_to_disk()
 
-    def _get_available_position(self):
-        with self.pbar_position_lock:
-            for pos in range(2, 100):
-                if pos not in self.active_positions:
-                    self.active_positions.add(pos)
-                    return pos
-            return 2
-
-    def _release_position(self, pos):
-        with self.pbar_position_lock:
-            if pos in self.active_positions:
-                self.active_positions.remove(pos)
-
-    def _update_file_pbar(self, file_pbar):
-        if file_pbar:
-            with file_pbar.get_lock():
-                file_pbar.update(1)
+    def _update_file_progress(self, advance=1):
+        if self.progress_manager:
+            self.progress_manager.update_main_task(advance=advance)
 
     def _upload_chunk_with_retry(
-        self, upload_url, local_path, offset, size, pbar, interrupted_check_func
+        self, upload_url, local_path, offset, size, progress_manager=None, task_id=None, interrupted_check_func=None
     ):
         for retry_count in range(5):
             if interrupted_check_func and interrupted_check_func():
                 return False
             stream = FileSliceReader(
-                local_path, offset, size, pbar, interrupted_check_func
+                local_path, offset, size, progress_manager, task_id, interrupted_check_func
             )
             try:
                 resp = requests.put(
@@ -168,7 +153,7 @@ class _139Uploader:
         local_path,
         parent_id,
         interrupted_check_func=None,
-        global_verify_pbar=None,
+        progress_manager=None,
     ):
         name = os.path.basename(local_path)
         try:
@@ -177,12 +162,9 @@ class _139Uploader:
             size = os.path.getsize(local_path)
 
             if size > 50 * 1024 * 1024 * 1024:
-                tqdm.write(
-                    f"[!] 文件过大: {name} ({size/1024**3:.2f}GB)。已跳过。"
-                )
-                if global_verify_pbar:
-                    with global_verify_pbar.get_lock():
-                        global_verify_pbar.update(size)
+                print(f"[!] 文件过大: {name} ({size/1024**3:.2f}GB)。已跳过。")
+                if progress_manager:
+                    progress_manager.update_verify_task(advance=size)
                 return {
                     "mode": "finished",
                     "name": name,
@@ -192,9 +174,8 @@ class _139Uploader:
 
             pd = self.get_file_progress(local_path)
             if pd:
-                if global_verify_pbar:
-                    with global_verify_pbar.get_lock():
-                        global_verify_pbar.update(size)
+                if progress_manager:
+                    progress_manager.update_verify_task(advance=size)
                 return {
                     "mode": "resume",
                     "local_path": local_path,
@@ -211,9 +192,8 @@ class _139Uploader:
                         if interrupted_check_func and interrupted_check_func():
                             return None
                         sha256.update(chunk)
-                        if global_verify_pbar:
-                            with global_verify_pbar.get_lock():
-                                global_verify_pbar.update(len(chunk))
+                        if progress_manager:
+                            progress_manager.update_verify_task(advance=len(chunk))
             except Exception as e:
                 raise e
 
@@ -272,14 +252,15 @@ class _139Uploader:
             }
 
     def execute_file_upload(
-        self, task_context, interrupted_check_func, file_pbar
+        self, task_context, interrupted_check_func, progress_manager=None
     ):
         local_path, name = task_context["local_path"], task_context["name"]
         if task_context["mode"] == "finished":
-            self._update_file_pbar(file_pbar)
+            if progress_manager:
+                progress_manager.update_main_task(advance=1)
             return task_context["success"], name
 
-        my_pos, pbar, success = None, None, False
+        task_id, success = None, False
         try:
             if task_context["mode"] == "resume":
                 pd = task_context["progress_data"]
@@ -301,26 +282,17 @@ class _139Uploader:
             size = task_context["size"]
             pure_auth = self.api_client.auth.replace("Basic ", "")
 
-            if size >= 10 * 1024 * 1024:
-                my_pos = self._get_available_position()
-                desc = "  续传" if task_context["mode"] == "resume" else "  ↳"
-                pbar = tqdm(
-                    total=size,
-                    unit="B",
-                    unit_scale=True,
-                    unit_divisor=1024,
-                    desc=f"{desc} {name[:15]}",
-                    leave=False,
-                    position=my_pos,
-                )
-                if completed:
-                    pbar.update(
-                        sum(
-                            p["partSize"]
-                            for p in part_infos
-                            if p["partNumber"] in completed
-                        )
+            if size >= 10 * 1024 * 1024 and progress_manager:
+                resume_mode = task_context["mode"] == "resume"
+                task_id = progress_manager.add_file_task(name, size, resume=resume_mode)
+                
+                if completed and task_id is not None:
+                    completed_size = sum(
+                        p["partSize"]
+                        for p in part_infos
+                        if p["partNumber"] in completed
                     )
+                    progress_manager.update_file_task(task_id, advance=completed_size)
 
             for i in range(0, len(part_infos), 100):
                 batch = [
@@ -358,7 +330,8 @@ class _139Uploader:
                         local_path,
                         p_item["parallelHashCtx"]["partOffset"],
                         p_item["partSize"],
-                        pbar,
+                        progress_manager,
+                        task_id,
                         interrupted_check_func,
                     ):
                         completed.append(p_num)
@@ -374,10 +347,10 @@ class _139Uploader:
                     else:
                         raise Exception("分片上传失败")
 
-            if pbar:
-                pbar.close()
-                self._release_position(my_pos)
-                my_pos = None
+            if task_id is not None and progress_manager:
+                progress_manager.finish_task(task_id)
+                progress_manager.remove_file_task(task_id)
+
             if not full_hash:
                 sha = hashlib.sha256()
                 with open(local_path, "rb") as f:
@@ -399,13 +372,12 @@ class _139Uploader:
                 self.clear_file_progress(local_path)
             return success, name
         except Exception:
+            if task_id is not None and progress_manager:
+                progress_manager.finish_task(task_id)
             return False, name
         finally:
-            if my_pos:
-                self._release_position(my_pos)
-            if pbar:
-                pbar.close()
-            self._update_file_pbar(file_pbar)
+            if progress_manager:
+                progress_manager.update_main_task(advance=1)
 
     def create_folder_with_name(
         self, parent_id, folder_name, interrupted_check_func=None
@@ -427,8 +399,8 @@ class _139Uploader:
         parent_id,
         max_workers=3,
         interrupted_check_func=None,
+        progress_manager=None,
     ):
-        # --- 修复：路径斜杠清洗与变量命名错误 ---
         processed_path = local_folder_path.rstrip('/\\')
         folder_name = os.path.basename(processed_path)
         
@@ -453,12 +425,11 @@ class _139Uploader:
                     depth_groups[d] = []
                 depth_groups[d].append(path)
 
-            dir_pbar = tqdm(
-                total=len(all_dirs),
-                desc="创建目录结构",
-                unit="dir",
-                leave=False,
-            )
+            dir_count = len(all_dirs)
+            dir_task_id = None
+            if progress_manager:
+                dir_task_id = progress_manager.start_main_task("创建目录", dir_count)
+
             with ThreadPoolExecutor(max_workers=10) as executor:
                 for d in sorted(depth_groups.keys()):
                     paths = depth_groups[d]
@@ -480,8 +451,11 @@ class _139Uploader:
                         if res_id:
                             with self.dir_map_lock:
                                 dir_cloud_ids[futures[f]] = res_id
-                            dir_pbar.update(1)
-            dir_pbar.close()
+                            if dir_task_id is not None and progress_manager:
+                                progress_manager.update_main_task(advance=1)
+
+            if dir_task_id is not None and progress_manager:
+                progress_manager.finish_task(dir_task_id)
 
         file_tasks = []
         for root, _, files in os.walk(processed_path):
@@ -503,22 +477,9 @@ class _139Uploader:
             for fp in f_paths:
                 total_files_size += os.path.getsize(fp)
 
-        file_pbar = tqdm(
-            total=total_files_count,
-            desc="文件总进度",
-            unit="file",
-            position=0,
-            leave=True,
-        )
-        verify_pbar = tqdm(
-            total=total_files_size,
-            desc="校验总进度",
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            position=1,
-            leave=True,
-        )
+        if progress_manager:
+            progress_manager.start_main_task("文件上传", total_files_count)
+            progress_manager.start_verify_task("校验文件", total_files_size)
 
         h_exec = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="HashWorker"
@@ -536,7 +497,7 @@ class _139Uploader:
                             fp,
                             p_id,
                             interrupted_check_func,
-                            verify_pbar,
+                            progress_manager,
                         )
                     )
             for f in as_completed(h_futures):
@@ -549,7 +510,7 @@ class _139Uploader:
                             self.execute_file_upload,
                             ctx,
                             interrupted_check_func,
-                            file_pbar,
+                            progress_manager,
                         )
                     )
             for f in as_completed(u_futures):
@@ -559,6 +520,6 @@ class _139Uploader:
         finally:
             h_exec.shutdown(wait=False)
             u_exec.shutdown(wait=True)
-            file_pbar.close()
-            verify_pbar.close()
+            if progress_manager:
+                progress_manager.finish_all()
         return True

@@ -6,81 +6,99 @@ from threading import Event
 from config import Config
 from uploader import _139Uploader
 import keyboard
-from tqdm import tqdm
 import traceback
+
+from utils import ProgressManager as ProgressManager
 
 INVALID_CHARS = r'[<>:"/\\|?*]'
 interrupt_event = Event()
 
+def on_ctrl_c():
+    if not interrupt_event.is_set():
+        print("\n[!] 用户中断 (Ctrl+C)...")
+        interrupt_event.set()
+
 def keyboard_interrupt_handler():
-    def on_ctrl_c():
-        if not interrupt_event.is_set():
-            print("\n[!] 用户中断 (Ctrl+C)...")
-            interrupt_event.set()
-    try: keyboard.add_hotkey('ctrl+c', on_ctrl_c)
-    except: pass
+    try: 
+        keyboard.add_hotkey('ctrl+c', on_ctrl_c)
+    except: 
+        pass
 
 def is_path_valid(path):
     clean_name = os.path.basename(path.rstrip('/\\'))
     return not re.search(INVALID_CHARS, clean_name)
 
 def process_files_pipeline(uploader, file_paths, parent_id, max_workers):
-    if not file_paths: return
+    if not file_paths: 
+        return
 
     total_size = sum(os.path.getsize(f) for f in file_paths)
-
-    total_pbar = tqdm(total=len(file_paths), desc="文件总体进度", unit="file", position=0, leave=True)
-    verify_pbar = tqdm(total=total_size, desc="校验总进度", unit="B", unit_scale=True, unit_divisor=1024, position=1, leave=True)
+    total_files = len(file_paths)
     
-    hash_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HashWorker")
-    upload_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="NetWorker")
-
-    hash_futures = []
-    upload_futures = []
-
+    progress_manager = ProgressManager(update_interval=0.2)
+    
     try:
-        for fp in file_paths:
-            if interrupt_event.is_set(): break
-            f = hash_executor.submit(
-                uploader.prepare_file_metadata, 
-                fp, 
-                parent_id, 
-                lambda: interrupt_event.is_set(),
-                verify_pbar
-            )
-            hash_futures.append(f)
-
-        for future in as_completed(hash_futures):
-            if interrupt_event.is_set(): break
+        main_progress = progress_manager.create_main_progress()
+        file_progress = progress_manager.create_file_progress()
+        verify_progress = progress_manager.create_verify_progress()
+        
+        with main_progress, file_progress:
+            progress_manager.start_main_task("总进度", total_files)
+            progress_manager.start_verify_task("校验", total_size)
+            
+            hash_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HashWorker")
+            upload_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="NetWorker")
+            
+            hash_futures = []
+            upload_futures = []
+            
             try:
-                task_context = future.result()
-                if task_context:
-                    up_f = upload_executor.submit(
-                        uploader.execute_file_upload, 
-                        task_context, 
-                        lambda: interrupt_event.is_set(), 
-                        total_pbar
+                for fp in file_paths:
+                    if interrupt_event.is_set(): 
+                        break
+                    f = hash_executor.submit(
+                        uploader.prepare_file_metadata, 
+                        fp, 
+                        parent_id, 
+                        lambda: interrupt_event.is_set(),
+                        progress_manager
                     )
-                    upload_futures.append(up_f)
-            except Exception as e:
-                print(f"Hash阶段异常: {e}")
-
-        for future in as_completed(upload_futures):
-            if interrupt_event.is_set(): break
-            try:
-                future.result()
-            except Exception:
-                pass
-
+                    hash_futures.append(f)
+                
+                for future in as_completed(hash_futures):
+                    if interrupt_event.is_set(): 
+                        break
+                    try:
+                        task_context = future.result()
+                        if task_context:
+                            up_f = upload_executor.submit(
+                                uploader.execute_file_upload, 
+                                task_context, 
+                                lambda: interrupt_event.is_set(), 
+                                progress_manager
+                            )
+                            upload_futures.append(up_f)
+                    except Exception as e:
+                        print(f"Hash阶段异常: {e}")
+                
+                for future in as_completed(upload_futures):
+                    if interrupt_event.is_set(): 
+                        break
+                    try:
+                        future.result()
+                    except Exception:
+                        pass
+                
+            finally:
+                hash_executor.shutdown(wait=False)
+                upload_executor.shutdown(wait=True)
+                progress_manager.finish_all()
+                
     finally:
-        hash_executor.shutdown(wait=False)
-        upload_executor.shutdown(wait=True)
-        total_pbar.close()
-        verify_pbar.close()
+        progress_manager.close()
 
 def main():
     try:
-        # --- 修复：Auth 判空校验 ---
         auth = Config.DEFAULT_AUTHORIZATION.strip()
         if not auth:
             print("\n[!] 错误: 未在 config.py 中检测到有效的 DEFAULT_AUTHORIZATION。")
@@ -92,17 +110,21 @@ def main():
             print("Usage: python main.py <paths...> [-w workers] [-p cloud_path]")
             sys.exit(1)
 
-        args = sys.argv[1:]; file_paths = []; folder_paths = []
-        max_workers = Config.DEFAULT_MAX_WORKERS; parent_path = None
+        args = sys.argv[1:]; 
+        file_paths = []; 
+        folder_paths = []
+        max_workers = Config.DEFAULT_MAX_WORKERS; 
+        parent_path = None
 
         i = 0
         while i < len(args):
             if args[i] == '-w' and i + 1 < len(args):
-                max_workers = int(args[i + 1]); i += 2
+                max_workers = int(args[i + 1]); 
+                i += 2
             elif args[i] == '-p' and i + 1 < len(args):
-                parent_path = args[i + 1]; i += 2
+                parent_path = args[i + 1]; 
+                i += 2
             else:
-                # --- 修复：处理带斜杠的路径 Bug ---
                 raw_input = args[i].strip('"\'').rstrip('/\\')
                 if not raw_input: 
                     i += 1
@@ -131,14 +153,26 @@ def main():
             process_files_pipeline(uploader, file_paths, parent_id, max_workers)
 
         for folder in folder_paths:
-            if interrupt_event.is_set(): break
+            if interrupt_event.is_set(): 
+                break
             print(f"[*] 正在处理文件夹: {os.path.basename(folder)}")
-            uploader.upload_folder(
-                folder, 
-                parent_id, 
-                max_workers=max_workers, 
-                interrupted_check_func=lambda: interrupt_event.is_set()
-            )
+            
+            progress_manager = ProgressManager(update_interval=0.2)
+                
+            try:
+                main_progress = progress_manager.create_main_progress()
+                file_progress = progress_manager.create_file_progress()
+                
+                with main_progress, file_progress:
+                    uploader.upload_folder(
+                        folder, 
+                        parent_id, 
+                        max_workers=max_workers, 
+                        interrupted_check_func=lambda: interrupt_event.is_set(),
+                        progress_manager=progress_manager
+                    )
+            finally:
+                progress_manager.close()
 
         print("\n[+] 任务处理完成。" if not interrupt_event.is_set() else "\n[-] 任务已中断。")
 
@@ -147,7 +181,8 @@ def main():
         traceback.print_exc()
     finally:
         keyboard.unhook_all()
-        if not interrupt_event.is_set(): input("\nDone. Press Enter...")
+        if not interrupt_event.is_set(): 
+            input("\nDone. Press Enter...")
 
 if __name__ == "__main__":
     main()

@@ -43,12 +43,9 @@ class ApiClient:
             "X-Requested-With": "XMLHttpRequest"
         }
         
-        # 使用 Session 代替直接请求，payload 保持原始 encode 格式
         resp = self.session.post(url, headers=headers, data=body_str.encode('utf-8'))
         return resp.json()
 
-    # 以下 get_personal_files, create_folder, find_folder_by_name 等函数逻辑保持原样即可
-    # 它们内部会调用已经优化过的 personal_post
     def get_personal_files(self, file_id):
         files = []
         next_page_cursor = ""
