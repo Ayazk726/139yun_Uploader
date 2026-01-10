@@ -51,6 +51,7 @@ def process_files_pipeline(uploader, file_paths, parent_id, max_workers, speed_m
 
     # 速度更新线程
     def update_speed_display():
+        """独立线程用于更新进度条上的速度显示"""
         last_update = time.time()
         while not interrupt_event.is_set():
             try:
@@ -121,24 +122,7 @@ def process_files_pipeline(uploader, file_paths, parent_id, max_workers, speed_m
 
 def process_folder_with_speed(uploader, folder_path, parent_id, max_workers, speed_monitor):
     """处理文件夹上传，带速度显示"""
-    # 启动文件夹上传的速度显示线程
-    def folder_speed_updater(file_pbar):
-        last_update = time.time()
-        while not interrupt_event.is_set():
-            try:
-                current_time = time.time()
-                if current_time - last_update >= 0.5:
-                    _, speed_str = speed_monitor.get_speed_and_formatted()
-                    file_pbar.set_postfix(speed=speed_str)
-                    last_update = current_time
-                time.sleep(0.1)
-            except Exception:
-                break
-
-    # 启动速度更新线程
-    speed_thread = threading.Thread(target=folder_speed_updater, args=(), daemon=True)
-
-    # 调用 uploader.upload_folder 并在结束后更新速度显示
+    # 调用 uploader.upload_folder，速度显示已在 uploader.py 中实现
     result = uploader.upload_folder(
         folder_path,
         parent_id,
